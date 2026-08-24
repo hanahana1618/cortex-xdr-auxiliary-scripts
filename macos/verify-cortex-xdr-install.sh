@@ -2,6 +2,12 @@
 #
 # verify-cortex-xdr-install.sh (macOS)
 #
+# *** UNTESTED: this script has NOT been run against a real macOS Cortex ***
+# *** XDR install. Paths, process names, and the launchd discovery logic ***
+# *** below were built from Palo Alto Networks' public documentation,    ***
+# *** not verified end-to-end on an actual endpoint. Review it and try   ***
+# *** it on a non-production machine before relying on its output.       ***
+#
 # Post-install health check for the Palo Alto Networks Cortex XDR macOS
 # agent. Checks the install directory, the launchd daemon, the running
 # agent process, cytool status (if present), and recent logs.
@@ -57,6 +63,8 @@ fi
 
 echo "== Cortex XDR install verification (macOS) =="
 echo "Host: $(hostname)   macOS: $(sw_vers -productVersion 2>/dev/null)   Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+echo "!! DISCLAIMER: this script has not been tested against a real Cortex XDR install on macOS. !!"
+echo "!! Treat its output as a starting point, not a confirmed result.                            !!"
 echo
 
 # 1. Install directory present

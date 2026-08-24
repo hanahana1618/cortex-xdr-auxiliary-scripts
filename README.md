@@ -47,7 +47,13 @@ sudo CORTEX_DISTRIBUTION_ID="<your-distribution-id>" \
 sudo ./linux/verify-cortex-xdr-install.sh
 ```
 
-## macos/
+## macos/ ⚠️ untested
+
+> **These scripts have not been run against a real macOS Cortex XDR
+> install.** Paths, the launchd discovery logic, and process names were
+> built from Palo Alto Networks' public documentation, not verified
+> end-to-end on an actual endpoint. Review before use and try on a
+> non-production machine first.
 
 - **`verify-cortex-xdr-install.sh`** — post-install health check: confirms
   the install directory exists under `/Library/Application Support/PaloAltoNetworks/Traps`,
@@ -66,7 +72,12 @@ sudo ./linux/verify-cortex-xdr-install.sh
 sudo ./macos/verify-cortex-xdr-install.sh
 ```
 
-## windows/
+## windows/ ⚠️ untested
+
+> **These scripts have not been run against a real Windows Cortex XDR
+> install.** Service/process names and paths were built from Palo Alto
+> Networks' public documentation, not verified end-to-end on an actual
+> endpoint. Review before use and try on a non-production machine first.
 
 - **`verify-cortex-xdr-install.ps1`** — post-install health check: confirms
   the install directory (`C:\Program Files\Palo Alto Networks\Traps`) and

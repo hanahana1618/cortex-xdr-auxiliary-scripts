@@ -3,6 +3,12 @@
     Post-install health check for the Palo Alto Networks Cortex XDR
     Windows agent.
 
+    *** UNTESTED: this script has NOT been run against a real Windows  ***
+    *** Cortex XDR install. Service/process names and paths were built ***
+    *** from Palo Alto Networks' public documentation, not verified    ***
+    *** end-to-end on an actual endpoint. Review it and try it on a    ***
+    *** non-production machine before relying on its output.           ***
+
 .DESCRIPTION
     Checks the install directory, the Windows service, the running agent
     process, cytool status (if present), and recent log/ProgramData
@@ -61,6 +67,8 @@ if (-not $isAdmin) {
 
 Write-Host "== Cortex XDR install verification (Windows) =="
 Write-Host "Host: $env:COMPUTERNAME   OS: $((Get-CimInstance Win32_OperatingSystem).Caption)   Date: $((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss')) UTC"
+Write-Host "!! DISCLAIMER: this script has not been tested against a real Cortex XDR install on Windows. !!" -ForegroundColor Yellow
+Write-Host "!! Treat its output as a starting point, not a confirmed result.                              !!" -ForegroundColor Yellow
 Write-Host ""
 
 # 1. Install directory present
