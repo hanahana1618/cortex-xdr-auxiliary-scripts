@@ -42,10 +42,25 @@ covering the general end-to-end process including the MDM-specific gotchas
   family (flags anything outside PANW's officially certified list, e.g.
   Ubuntu/Debian derivatives like Pop!_OS), and HTTPS reachability to the
   distribution server on port 443. Pass `--skip-checks` to bypass them.
-- **`verify-cortex-xdr-install.sh`** — post-install health check: confirms
-  the `traps_pmd` systemd service is active/enabled, the agent process is
-  running, `cytool` reports status (if present), and recent log activity
-  exists under `/var/log/traps`. Requires systemd.
+- **`verify-cortex-xdr-install.sh`** — post-install health check. Beyond
+  confirming `traps_pmd` is active/enabled and running (and `cytool`
+  status, and recent `/var/log/traps` activity), it also digs into *why*
+  a running agent might still not show up correctly in the tenant console:
+  - **Kernel vs. user-space mode** — checks `lsmod`/`dmesg`/journal logs
+    for the Cortex XDR kernel driver. On uncertified/distro-patched
+    kernels (e.g. Pop!_OS), the agent silently falls back to degraded
+    user-space/async mode instead of failing loudly.
+  - **Registration/pairing signals** — greps `traps_pmd.service` logs for
+    registration/pairing/connection/error lines.
+  - **Clock sync** — via `timedatectl`; skewed clocks can silently break
+    TLS/registration.
+  - **Distribution-server reachability** — HTTPS reachability to the
+    distribution server (defaults to PANW's, or set
+    `$CORTEX_DISTRIBUTION_SERVER` for your tenant's).
+  - **Hostname stability** — flags if `traps_pmd.service`'s logs show more
+    than one hostname since the agent started (e.g. renamed mid-install),
+    since the console may have registered the endpoint under a now-stale
+    name. Requires systemd.
 
 ```bash
 # Install
