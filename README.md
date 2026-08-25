@@ -49,9 +49,23 @@ covering the general end-to-end process including the MDM-specific gotchas
   - **Kernel vs. user-space mode** — checks `lsmod`/`dmesg`/journal logs
     for the Cortex XDR kernel driver. On uncertified/distro-patched
     kernels (e.g. Pop!_OS), the agent silently falls back to degraded
-    user-space/async mode instead of failing loudly.
+    user-space/async mode instead of failing loudly. **This is a hard
+    `[FAIL]`**, not a warning — an agent stuck in user-space/async mode
+    isn't correctly/fully installed, even while the service reports
+    "active".
+  - **"Kernel Module Locked" detection** — a *different*, specific,
+    documented, and actually recoverable condition (repeated ungraceful
+    shutdowns tripping a lockout — see PANW KB `kA14u000000CqdACAS`),
+    distinct from a genuinely unsupported kernel. Pass `--fix-kernel-lock`
+    to apply PANW's documented recovery *only if* that exact condition is
+    detected (it briefly disables agent protection — never runs
+    automatically, and does nothing for a plain unsupported-kernel case,
+    since there is no local command to force kernel mode onto a kernel
+    the signed module wasn't built for).
   - **Registration/pairing signals** — greps `traps_pmd.service` logs for
-    registration/pairing/connection/error lines.
+    registration/pairing/connection/error lines. **Also a hard `[FAIL]`**
+    if there's zero registration evidence at all, or if error/fail lines
+    are found.
   - **Clock sync** — via `timedatectl`; skewed clocks can silently break
     TLS/registration.
   - **Distribution-server reachability** — HTTPS reachability to the
@@ -61,6 +75,10 @@ covering the general end-to-end process including the MDM-specific gotchas
     than one hostname since the agent started (e.g. renamed mid-install),
     since the console may have registered the endpoint under a now-stale
     name. Requires systemd.
+
+  The summary line reports passed/warned/failed counts separately and
+  will not call an install "healthy" when hard failures are present —
+  exit code `1` on any `[FAIL]`.
 
 ```bash
 # Install

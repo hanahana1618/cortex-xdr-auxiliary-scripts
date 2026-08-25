@@ -16,16 +16,43 @@
 # the console instead of updating the existing one.
 #
 # Usage:
-#   sudo ./verify-cortex-xdr-install.sh
+#   sudo ./verify-cortex-xdr-install.sh [--fix-kernel-lock]
+#
+#   --fix-kernel-lock   Opt-in only. If (and only if) cytool reports the
+#                        specific "Kernel Module Locked" condition (caused
+#                        by repeated ungraceful shutdowns, per PANW KB
+#                        article kA14u000000CqdACAS), run their documented
+#                        recovery sequence. This briefly DISABLES agent
+#                        protection (cytool runtime stop/start) -- it is
+#                        NOT run by default, and does nothing if that exact
+#                        condition isn't detected. It will NOT fix a
+#                        genuinely unsupported/incompatible kernel (a
+#                        prebuilt signed kernel module can't be forced onto
+#                        a kernel it wasn't built for) -- there is no local
+#                        command for that. If the module is simply absent
+#                        because the running kernel isn't PANW-certified,
+#                        your only real options are (a) run a certified
+#                        kernel, or (b) accept User Space/eBPF mode as the
+#                        intended operation mode, set via the endpoint's
+#                        Agent Settings Profile in the Cortex XDR console
+#                        -- not a local flag.
 #
 # Exit codes:
 #   0 - no hard failures (may still have [WARN]s worth reading -- e.g. a
-#       missing kernel module or a hostname change can explain an agent
-#       that's running but not showing correctly in the tenant console,
-#       even though every hard PASS/FAIL check passed)
+#       hostname change can explain an agent that's running but not
+#       showing correctly in the tenant console, even though every hard
+#       PASS/FAIL check passed)
 #   1 - agent not found / not running / a hard check failed
 #
 set -uo pipefail
+
+FIX_KERNEL_LOCK=0
+for arg in "$@"; do
+  case "$arg" in
+    --fix-kernel-lock) FIX_KERNEL_LOCK=1 ;;
+    *) echo "Unknown argument: $arg" >&2; exit 1 ;;
+  esac
+done
 
 PASS=0
 FAIL=0
@@ -94,7 +121,9 @@ fi
 #    A running service does not mean the kernel driver ("Cortex XDR core")
 #    actually loaded. On kernels PANW hasn't certified (e.g. distro-patched
 #    kernels like Pop!_OS's), the agent silently falls back to degraded
-#    user-space/async mode instead of failing loudly.
+#    user-space/async mode instead of failing loudly. Treated as a hard
+#    FAIL, not a warning: an agent stuck in user-space/async mode is not
+#    correctly/fully installed, even while the service reports "active".
 echo
 echo "-- Kernel module / operation mode --"
 KMOD_HIT="$(lsmod 2>/dev/null | grep -iE '^(pan_|cortex|traps|kproc)' | head -n1)"
@@ -102,10 +131,10 @@ if [[ -n "$KMOD_HIT" ]]; then
   echo "[PASS] Cortex XDR kernel module appears loaded: $KMOD_HIT"
   PASS=$((PASS + 1))
 else
-  echo "[WARN] No Cortex XDR kernel module found in 'lsmod' -- agent is likely running in"
-  echo "       user-space/asynchronous mode (reduced protection capability), commonly caused"
-  echo "       by running an uncertified/distro-patched kernel: $(uname -r)"
-  WARN=$((WARN + 1))
+  echo "[FAIL] No Cortex XDR kernel module found in 'lsmod' -- agent is running in degraded"
+  echo "       user-space/asynchronous mode, not full kernel mode. Commonly caused by running"
+  echo "       an uncertified/distro-patched kernel: $(uname -r)"
+  FAIL=$((FAIL + 1))
 fi
 
 if command -v dmesg >/dev/null 2>&1; then
@@ -122,17 +151,66 @@ if [[ -n "$JOURNAL_MODE_HITS" ]]; then
   echo "$JOURNAL_MODE_HITS" | sed 's/^/    /'
 fi
 
+# 6b. "Kernel Module Locked" -- a specific, documented, RECOVERABLE
+#     condition (PANW KB kA14u000000CqdACAS), distinct from a genuinely
+#     unsupported kernel. Caused by repeated ungraceful shutdowns tripping
+#     a lockout; recovery clears /etc/traps/km/.load_lock. Only touches
+#     the running agent if --fix-kernel-lock was passed AND this exact
+#     condition is detected -- never automatically.
+if [[ -n "${CYTOOL:-}" && -x "${CYTOOL:-}" ]]; then
+  CYTOOL_STATUS="$("$CYTOOL" status 2>&1)"
+  if echo "$CYTOOL_STATUS" | grep -iq "Kernel Module Locked"; then
+    echo "[FAIL] cytool reports 'Kernel Module Locked' -- a specific, recoverable condition"
+    echo "       (repeated ungraceful shutdowns tripped a lockout), NOT the same thing as an"
+    echo "       unsupported kernel. Documented recovery: PANW KB kA14u000000CqdACAS."
+    FAIL=$((FAIL + 1))
+    if [[ "$FIX_KERNEL_LOCK" -eq 1 ]]; then
+      echo "       --fix-kernel-lock passed -- running the documented recovery sequence:"
+      echo "       (this briefly disables agent protection)"
+      set -x
+      "$CYTOOL" runtime stop
+      rm -f "/etc/traps/km/.load_lock"
+      "$CYTOOL" runtime start
+      "$CYTOOL" status
+      set +x
+      echo "       Recovery sequence complete. Re-run this script (without the flag) to confirm."
+    else
+      echo "       Re-run with --fix-kernel-lock to apply it (disables protection briefly)."
+    fi
+  else
+    echo "[INFO] cytool status does not report 'Kernel Module Locked' -- if the kernel module is"
+    echo "       still absent above, this is not a lock-file issue and that recovery won't help."
+    echo "       See the header comment for the two real remedies (certified kernel, or an"
+    echo "       explicit User Space mode policy set in the Cortex XDR console)."
+  fi
+elif [[ "$FIX_KERNEL_LOCK" -eq 1 ]]; then
+  echo "[SKIP] --fix-kernel-lock passed but cytool wasn't found -- nothing to run."
+fi
+
 # 7. Tenant registration / pairing signals
-#    Doesn't prove registration succeeded (that's authoritative in the
-#    console + cytool's own status field, checked above), but surfaces the
-#    log lines most likely to explain a missing/stale console entry.
+#    Doesn't prove registration succeeded the way the console or cytool's
+#    own status field would (checked above, when available), but this is
+#    the log evidence that would explain a missing/stale console entry.
+#    Treated as a hard FAIL, not neutral info: an agent with zero
+#    registration/pairing/connection activity in its own logs is not
+#    something this script will call "installed correctly and healthy".
 echo
 echo "-- Tenant registration / pairing signals --"
 REG_HITS="$(journalctl -u traps_pmd.service --no-pager 2>/dev/null | grep -iE 'regist|pair|connect|error|fail' | tail -20)"
-if [[ -n "$REG_HITS" ]]; then
+REG_ERROR_HITS="$(echo "$REG_HITS" | grep -iE 'error|fail')"
+if [[ -n "$REG_ERROR_HITS" ]]; then
+  echo "[FAIL] Error/failure lines found in traps_pmd.service logs:"
+  echo "$REG_ERROR_HITS" | sed 's/^/  /'
+  FAIL=$((FAIL + 1))
+elif [[ -n "$REG_HITS" ]]; then
+  echo "[PASS] Found registration/pairing/connection activity in traps_pmd.service logs, no errors:"
   echo "$REG_HITS" | sed 's/^/  /'
+  PASS=$((PASS + 1))
 else
-  echo "[INFO] No registration/pairing/connection/error lines found in traps_pmd.service logs"
+  echo "[FAIL] No registration/pairing/connection/error lines found anywhere in traps_pmd.service"
+  echo "       logs -- no evidence this agent has ever registered with a tenant. This alone"
+  echo "       explains a missing console entry; don't call this install healthy without it."
+  FAIL=$((FAIL + 1))
 fi
 
 # 8. System clock sync (cert validation and registration can fail silently on clock skew)
