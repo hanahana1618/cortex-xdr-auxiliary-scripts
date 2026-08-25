@@ -220,4 +220,24 @@ bash "$INSTALLER" -- \
   --distribution-server "$DISTRIBUTION_SERVER" \
   --distribution-id "$DISTRIBUTION_ID"
 
-echo "== Install command finished. Run verify-cortex-xdr-install.sh to confirm the agent is healthy. =="
+echo "== Install command finished. =="
+
+# cytool is not a separate package -- it ships bundled inside the agent
+# install at /opt/traps/bin/cytool. This just confirms it actually landed
+# where expected; it does not install anything extra. Running as root
+# here (the script requires sudo) avoids the permission-denied result
+# you'd get checking /opt/traps as a regular user (it's drwx--x--x).
+echo
+echo "== Confirming cytool =="
+CYTOOL="$(find /opt/traps -maxdepth 3 -iname cytool 2>/dev/null | head -n1)"
+if [[ -n "$CYTOOL" && -x "$CYTOOL" ]]; then
+  echo "Found: $CYTOOL"
+  "$CYTOOL" --version 2>&1 || "$CYTOOL" -h 2>&1 || true
+else
+  echo "WARNING: cytool not found under /opt/traps -- the agent package may not have installed" >&2
+  echo "         completely. Re-run verify-cortex-xdr-install.sh and check the install log above" >&2
+  echo "         for errors." >&2
+fi
+
+echo
+echo "== Run verify-cortex-xdr-install.sh to confirm the agent is healthy. =="

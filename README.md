@@ -42,6 +42,12 @@ covering the general end-to-end process including the MDM-specific gotchas
   family (flags anything outside PANW's officially certified list, e.g.
   Ubuntu/Debian derivatives like Pop!_OS), and HTTPS reachability to the
   distribution server on port 443. Pass `--skip-checks` to bypass them.
+  After installing, it confirms `cytool` landed at `/opt/traps/bin/cytool`
+  and prints its version — `cytool` isn't a separate package, it ships
+  bundled inside the agent install, so this is a sanity check rather than
+  an install step. (Checking for it as a regular user afterward will
+  falsely report it missing — `/opt/traps` is root-only traversable
+  (`drwx--x--x`); this check runs while the script is still root.)
 - **`verify-cortex-xdr-install.sh`** — post-install health check. Beyond
   confirming `traps_pmd` is active/enabled and running (and `cytool`
   status, and recent `/var/log/traps` activity), it also digs into *why*
