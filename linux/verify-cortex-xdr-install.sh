@@ -19,13 +19,17 @@
 #   sudo ./verify-cortex-xdr-install.sh
 #
 # Exit codes:
-#   0 - agent appears installed and running
-#   1 - agent not found / not running / checks failed
+#   0 - no hard failures (may still have [WARN]s worth reading -- e.g. a
+#       missing kernel module or a hostname change can explain an agent
+#       that's running but not showing correctly in the tenant console,
+#       even though every hard PASS/FAIL check passed)
+#   1 - agent not found / not running / a hard check failed
 #
 set -uo pipefail
 
 PASS=0
 FAIL=0
+WARN=0
 
 check() {
   local desc="$1"
@@ -80,6 +84,7 @@ if [[ -d "$LOGDIR" ]]; then
     PASS=$((PASS + 1))
   else
     echo "[WARN] No log activity in $LOGDIR in the last 5 minutes (may be normal if idle)"
+    WARN=$((WARN + 1))
   fi
 else
   echo "[SKIP] Log directory $LOGDIR not found"
@@ -100,6 +105,7 @@ else
   echo "[WARN] No Cortex XDR kernel module found in 'lsmod' -- agent is likely running in"
   echo "       user-space/asynchronous mode (reduced protection capability), commonly caused"
   echo "       by running an uncertified/distro-patched kernel: $(uname -r)"
+  WARN=$((WARN + 1))
 fi
 
 if command -v dmesg >/dev/null 2>&1; then
@@ -138,6 +144,7 @@ if command -v timedatectl >/dev/null 2>&1; then
     PASS=$((PASS + 1))
   else
     echo "[WARN] System clock is NOT reported as NTP-synchronized -- clock skew can silently break TLS/registration"
+    WARN=$((WARN + 1))
   fi
 else
   echo "[SKIP] timedatectl not available"
@@ -153,6 +160,7 @@ if command -v curl >/dev/null 2>&1; then
     PASS=$((PASS + 1))
   else
     echo "[WARN] Could not reach $DIST_SERVER over HTTPS (check outbound TCP/443 / proxy / DNS)"
+    WARN=$((WARN + 1))
   fi
   echo "       (set \$CORTEX_DISTRIBUTION_SERVER to check your actual tenant's server instead of the default)"
 else
@@ -173,6 +181,7 @@ if [[ "$LOGGED_COUNT" -gt 1 ]]; then
   echo "$LOGGED_HOSTNAMES" | sed 's/^/         /'
   echo "       Current hostname: $CURRENT_HOSTNAME"
   echo "       If registration happened under an earlier name, check the console for a stale/duplicate entry there."
+  WARN=$((WARN + 1))
 elif [[ "$LOGGED_COUNT" -eq 1 ]]; then
   echo "[PASS] Hostname has been stable ($CURRENT_HOSTNAME) for all logged traps_pmd.service activity"
   PASS=$((PASS + 1))
@@ -181,12 +190,17 @@ else
 fi
 
 echo
-echo "== Summary: $PASS passed, $FAIL failed =="
+echo "== Summary: $PASS passed, $WARN warned, $FAIL failed =="
 
-if [[ "$FAIL" -eq 0 ]]; then
-  echo "Cortex XDR agent looks installed and healthy."
-  exit 0
-else
+if [[ "$FAIL" -gt 0 ]]; then
   echo "Cortex XDR agent verification found problems - see [FAIL] lines above."
   exit 1
+elif [[ "$WARN" -gt 0 ]]; then
+  echo "No hard failures, but $WARN warning(s) above are worth resolving -- e.g. a kernel-module or"
+  echo "hostname-stability warning can explain an agent that's running but not showing correctly in"
+  echo "the tenant console, even though every hard check passed."
+  exit 0
+else
+  echo "Cortex XDR agent looks installed and healthy, with no warnings."
+  exit 0
 fi
