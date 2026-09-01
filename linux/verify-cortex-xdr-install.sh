@@ -46,6 +46,18 @@
 #
 set -uo pipefail
 
+# Bold/red only when writing to an actual terminal, so piped/logged output
+# doesn't fill up with raw escape codes.
+if [[ -t 1 ]]; then
+  BOLD=$'\033[1m'
+  RED=$'\033[31m'
+  RESET=$'\033[0m'
+else
+  BOLD=''
+  RED=''
+  RESET=''
+fi
+
 FIX_KERNEL_LOCK=0
 for arg in "$@"; do
   case "$arg" in
@@ -98,8 +110,36 @@ if [[ -n "$CYTOOL" && -x "$CYTOOL" ]]; then
   echo "-- cytool runtimequery --"
   "$CYTOOL" runtimequery 2>&1 | sed 's/^/  /' || true
   check "cytool reports agent status" bash -c "'$CYTOOL' runtimequery >/dev/null 2>&1"
+
+  # 4b. Distribution ID configured.
+  #     CAVEAT: PANW does not publicly document an exact field name/label
+  #     for this in cytool's output, so this is a best-effort scan of
+  #     `cytool status` + `runtimequery` text for any line mentioning
+  #     "distribution", checking it has a non-empty, non-placeholder value.
+  #     If your agent version's cytool wording differs, adjust the grep
+  #     pattern below to match what you actually see -- don't trust this
+  #     blindly without checking real output on a known-good install first.
+  echo
+  echo "-- Distribution ID --"
+  DIST_ID_LINE="$( ("$CYTOOL" status 2>/dev/null; "$CYTOOL" runtimequery 2>/dev/null) | grep -i "distribution" | head -n1)"
+  DIST_ID_VALUE="$(echo "$DIST_ID_LINE" | sed -E 's/^[^:=]*[:=][[:space:]]*//' | tr -d '[:space:]')"
+  case "${DIST_ID_VALUE,,}" in
+    ""|"n/a"|"none"|"0"|"null"|"unset")
+      echo "${BOLD}${RED}[FAIL] No distribution ID appears to be set on this agent.${RESET}"
+      echo "${BOLD}${RED}       This installation is UNSUCCESSFUL -- the agent was never told which${RESET}"
+      echo "${BOLD}${RED}       tenant to register with. Reinstall with a valid --distribution-id.${RESET}"
+      FAIL=$((FAIL + 1))
+      ;;
+    *)
+      echo "[PASS] Distribution ID appears set: $DIST_ID_LINE"
+      PASS=$((PASS + 1))
+      ;;
+  esac
 else
-  echo "[SKIP] cytool binary not found under /opt/traps (path may differ by version)"
+  echo "[SKIP] cytool binary not found under /opt/traps (path may differ by version, or this"
+  echo "       script isn't running as root -- /opt/traps is only traversable by root, so a"
+  echo "       non-root run cannot tell 'genuinely missing' apart from 'permission blocked')."
+  echo "[SKIP] Cannot confirm distribution ID without cytool -- re-run with sudo to check it."
 fi
 
 # 5. Recent agent log activity (last 5 minutes)
