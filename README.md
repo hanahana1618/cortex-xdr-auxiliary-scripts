@@ -69,9 +69,10 @@ covering the general end-to-end process including the MDM-specific gotchas
     since there is no local command to force kernel mode onto a kernel
     the signed module wasn't built for).
   - **Registration/pairing signals** — greps `traps_pmd.service` logs for
-    registration/pairing/connection/error lines. **Also a hard `[FAIL]`**
-    if there's zero registration evidence at all, or if error/fail lines
-    are found.
+    registration/pairing/connection/error lines. Only a hard `[FAIL]` when
+    `cytool`'s own check-in evidence (below) isn't available; otherwise
+    informational, since a working agent can log nothing here at all (see
+    below).
   - **Clock sync** — via `timedatectl`; skewed clocks can silently break
     TLS/registration.
   - **Distribution-server reachability** — HTTPS reachability to the
@@ -81,17 +82,24 @@ covering the general end-to-end process including the MDM-specific gotchas
     than one hostname since the agent started (e.g. renamed mid-install),
     since the console may have registered the endpoint under a now-stale
     name. Requires systemd.
-  - **Distribution ID configured** — scans `cytool status`/`runtimequery`
-    for a line mentioning "distribution" and checks it has a real,
-    non-placeholder value. **Printed in bold red and treated as a hard
-    `[FAIL]`** if no distribution ID appears set — the agent was never
-    told which tenant to register with, so the install is marked
-    unsuccessful. ⚠️ PANW doesn't publicly document the exact field
-    name/label `cytool` uses for this, so the match is a best-effort
-    heuristic (any "distribution" line, checked against common
-    placeholder values like empty/`N/A`/`none`/`0`) — verify against real
-    output on a known-good install and adjust the pattern if your agent
-    version phrases it differently.
+  - **Tenant check-in evidence** — parses `cytool status`'s "Last
+    Successful Check-In time (UTC)" field. **Printed in bold red and
+    treated as a hard `[FAIL]`** if that field is missing, empty, or
+    "Never" — the agent has never successfully reached the tenant, so the
+    install is marked unsuccessful.
+
+    (This check went through a real revision: it originally scanned for a
+    "distribution ID" line instead, on the assumption `cytool` would print
+    one. Testing against a real, successfully-checked-in agent showed
+    `cytool status` doesn't print a distribution ID at all — that version
+    of the check produced a false `[FAIL]` on a working install. Check-in
+    time is what's actually present in real output and actually proves
+    the thing that matters: whether this agent ever reached the tenant.)
+
+    Because of that same finding, the older journalctl-based
+    "registration/pairing signals" check below is now informational-only
+    whenever cytool's check-in evidence is available — it only counts
+    toward PASS/FAIL as a fallback when cytool itself can't be reached.
 
   The summary line reports passed/warned/failed counts separately and
   will not call an install "healthy" when hard failures are present —
@@ -138,10 +146,12 @@ sudo ./linux/verify-cortex-xdr-install.sh
   `paloalto`/`traps`/`cortex` in `/Library/LaunchDaemons` and `launchctl list`
   rather than hardcoding a label that could be wrong for your agent version.
 
-  Also checks **distribution ID configured** the same way as the Linux
-  script: scans `cytool status`/`runtimequery` for a "distribution" line
-  with a real value. **Bold red `[FAIL]`, install marked unsuccessful** if
-  none is found — same heuristic-match caveat as Linux applies here.
+  Also checks **tenant check-in evidence**, same as Linux: parses
+  `cytool status`'s "Last Successful Check-In time (UTC)" field. **Bold
+  red `[FAIL]`, install marked unsuccessful** if it's missing/empty/Never.
+  This field's wording is confirmed on Linux (cytool is a shared binary
+  across platforms) but not independently confirmed on macOS — check the
+  raw `cytool status` output this script prints if it looks wrong.
 - **`INSTALL_GUIDE.md`** — general walkthrough of the whole deployment: why
   profile-before-package ordering matters, the step-by-step, and a
   requirements table.
@@ -179,12 +189,14 @@ sudo ./macos/verify-cortex-xdr-install.sh
   runs `cytool.exe` if present, and checks recent file activity plus
   related Windows Event Log entries.
 
-  Also checks **distribution ID configured**, same approach as Linux/macOS:
-  scans `cytool status`/`runtimequery` output for a "distribution" line
-  with a real value. **Bold red `[FAIL]`, install marked unsuccessful** if
-  none is found — same heuristic-match caveat applies (rendered via ANSI
-  escapes, layered on `-ForegroundColor Red`; Windows Terminal/PowerShell
-  7+ render this correctly by default).
+  Also checks **tenant check-in evidence**, same approach as Linux/macOS:
+  parses `cytool status`'s "Last Successful Check-In time (UTC)" field.
+  **Bold red `[FAIL]`, install marked unsuccessful** if it's missing/
+  empty/Never (rendered via ANSI escapes layered on `-ForegroundColor
+  Red`; Windows Terminal/PowerShell 7+ render this correctly by default).
+  This field's wording is confirmed on Linux (cytool is a shared binary
+  across platforms) but not independently confirmed on Windows — check
+  the raw `cytool status` output this script prints if it looks wrong.
 
   Run from an elevated (Administrator) PowerShell prompt.
 - **`INSTALL_GUIDE.md`** — general walkthrough of the whole deployment: why

@@ -121,38 +121,47 @@ fi
 CYTOOL="$(find "$INSTALL_DIR" -maxdepth 3 -iname cytool 2>/dev/null | head -n1)"
 if [[ -n "$CYTOOL" && -x "$CYTOOL" ]]; then
   echo
+  echo "-- cytool status --"
+  CYTOOL_STATUS_OUT="$(sudo "$CYTOOL" status 2>&1)"
+  echo "$CYTOOL_STATUS_OUT" | sed 's/^/  /'
+  echo
   echo "-- cytool runtimequery --"
   sudo "$CYTOOL" runtimequery 2>&1 | sed 's/^/  /' || true
   check "cytool reports agent status" bash -c "sudo '$CYTOOL' runtimequery >/dev/null 2>&1"
 
-  # 4b. Distribution ID configured.
-  #     CAVEAT: PANW does not publicly document an exact field name/label
-  #     for this in cytool's output, so this is a best-effort scan of
-  #     `cytool status` + `runtimequery` text for any line mentioning
-  #     "distribution", checking it has a non-empty, non-placeholder value.
-  #     If your agent version's cytool wording differs, adjust the grep
-  #     pattern below to match what you actually see -- don't trust this
-  #     blindly without checking real output on a known-good install first.
+  # 4b. Tenant check-in evidence.
+  #     Confirmed (via real Linux agent output) that `cytool status` prints
+  #     a "Last Successful Check-In time" field -- this is the actual,
+  #     reliable signal that the agent has successfully talked to the
+  #     tenant. An earlier version of this check instead grepped for a
+  #     "distribution ID" line, which real-world testing showed cytool
+  #     doesn't print at all on a working, checked-in agent (false FAIL).
+  #     CAVEAT: this exact field wording is confirmed on Linux; it's
+  #     expected (cytool is shared across platforms) but NOT independently
+  #     confirmed on macOS -- verify against real output here and adjust
+  #     if this agent version phrases it differently.
   echo
-  echo "-- Distribution ID --"
-  DIST_ID_LINE="$( (sudo "$CYTOOL" status 2>/dev/null; sudo "$CYTOOL" runtimequery 2>/dev/null) | grep -i "distribution" | head -n1)"
-  DIST_ID_VALUE="$(echo "$DIST_ID_LINE" | sed -E 's/^[^:=]*[:=][[:space:]]*//' | tr -d '[:space:]')"
-  case "$(echo "$DIST_ID_VALUE" | tr '[:upper:]' '[:lower:]')" in
-    ""|"n/a"|"none"|"0"|"null"|"unset")
-      echo "${BOLD}${RED}[FAIL] No distribution ID appears to be set on this agent.${RESET}"
-      echo "${BOLD}${RED}       This installation is UNSUCCESSFUL -- the agent was never told which${RESET}"
-      echo "${BOLD}${RED}       tenant to register with. Reinstall with a valid distribution ID.${RESET}"
-      FAIL=$((FAIL + 1))
-      ;;
-    *)
-      echo "[PASS] Distribution ID appears set: $DIST_ID_LINE"
-      PASS=$((PASS + 1))
-      ;;
-  esac
+  echo "-- Tenant check-in --"
+  CHECKIN_LINE="$(echo "$CYTOOL_STATUS_OUT" | grep -i "Successful Check-In time (UTC)" | head -n1)"
+  CHECKIN_VALUE="$(echo "$CHECKIN_LINE" | sed -E 's/^[^:]*\(UTC\):[[:space:]]*//')"
+  if [[ -z "$CHECKIN_LINE" ]]; then
+    echo "${BOLD}${RED}[FAIL] No 'Last Successful Check-In' field found in cytool status output.${RESET}"
+    echo "${BOLD}${RED}       Cannot confirm this agent has ever reached the tenant -- treating this${RESET}"
+    echo "${BOLD}${RED}       installation as UNSUCCESSFUL. (cytool's output format may differ by${RESET}"
+    echo "${BOLD}${RED}       agent version -- check the raw output above if this looks wrong.)${RESET}"
+    FAIL=$((FAIL + 1))
+  elif [[ -z "$CHECKIN_VALUE" || "$CHECKIN_VALUE" =~ ^[Nn]ever$ ]]; then
+    echo "${BOLD}${RED}[FAIL] Last Successful Check-In is empty/'Never' -- this agent has NOT${RESET}"
+    echo "${BOLD}${RED}       registered/checked in with the tenant. Installation is UNSUCCESSFUL.${RESET}"
+    FAIL=$((FAIL + 1))
+  else
+    echo "[PASS] Last successful check-in: $CHECKIN_VALUE"
+    PASS=$((PASS + 1))
+  fi
 else
   echo "[SKIP] cytool not found under '$INSTALL_DIR' (path may differ by version, or this"
   echo "       script isn't running as root)."
-  echo "[SKIP] Cannot confirm distribution ID without cytool -- re-run with sudo to check it."
+  echo "[SKIP] Cannot confirm tenant check-in without cytool -- re-run with sudo to check it."
 fi
 
 # 5. Recent log activity

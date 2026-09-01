@@ -116,6 +116,14 @@ Test-Check "Cortex XDR process running (cyserver.exe)" { (Get-Process -Name "cys
 $cytool = Join-Path $installDir "cytool.exe"
 if (Test-Path $cytool) {
     Write-Host ""
+    Write-Host "-- cytool status --"
+    try {
+        $cytoolStatusOutput = & $cytool status 2>&1
+    } catch {
+        $cytoolStatusOutput = @()
+    }
+    $cytoolStatusOutput | ForEach-Object { Write-Host "  $_" }
+    Write-Host ""
     Write-Host "-- cytool runtimequery --"
     try {
         $cytoolOutput = & $cytool runtimequery 2>&1
@@ -126,39 +134,43 @@ if (Test-Path $cytool) {
         $fail++
     }
 
-    # 5b. Distribution ID configured.
-    #     CAVEAT: PANW does not publicly document an exact field name/label
-    #     for this in cytool's output, so this is a best-effort scan of
-    #     `cytool status` + `runtimequery` text for any line mentioning
-    #     "distribution", checking it has a non-empty, non-placeholder
-    #     value. If your agent version's cytool wording differs, adjust the
-    #     regex below to match what you actually see -- don't trust this
-    #     blindly without checking real output on a known-good install first.
+    # 5b. Tenant check-in evidence.
+    #     Confirmed (via real Linux agent output) that `cytool status`
+    #     prints a "Last Successful Check-In time" field -- this is the
+    #     actual, reliable signal that the agent has successfully talked
+    #     to the tenant. An earlier version of this check instead grepped
+    #     for a "distribution ID" line, which real-world testing showed
+    #     cytool doesn't print at all on a working, checked-in agent
+    #     (false FAIL).
+    #     CAVEAT: this exact field wording is confirmed on Linux; it's
+    #     expected (cytool is shared across platforms) but NOT
+    #     independently confirmed on Windows -- verify against real output
+    #     here and adjust if this agent version phrases it differently.
     Write-Host ""
-    Write-Host "-- Distribution ID --"
-    try {
-        $cytoolStatusOutput = & $cytool status 2>&1
-    } catch {
-        $cytoolStatusOutput = @()
+    Write-Host "-- Tenant check-in --"
+    $checkinLine = $cytoolStatusOutput | Where-Object { $_ -match 'Successful Check-In time \(UTC\)' } | Select-Object -First 1
+    $checkinValue = ''
+    if ($checkinLine) {
+        $checkinValue = ($checkinLine -replace '^[^:]*\(UTC\):\s*', '').Trim()
     }
-    $distLine = ($cytoolStatusOutput + $cytoolOutput) | Where-Object { $_ -match 'distribution' } | Select-Object -First 1
-    $distValue = ''
-    if ($distLine) {
-        $distValue = ($distLine -replace '^[^:=]*[:=]\s*', '').Trim()
-    }
-    if ([string]::IsNullOrWhiteSpace($distValue) -or $distValue -in @('N/A', 'n/a', 'none', '0', 'null', 'unset')) {
-        Write-Host "${Bold}[FAIL] No distribution ID appears to be set on this agent.${ResetAnsi}" -ForegroundColor Red
-        Write-Host "${Bold}       This installation is UNSUCCESSFUL -- the agent was never told which${ResetAnsi}" -ForegroundColor Red
-        Write-Host "${Bold}       tenant to register with. Reinstall with a valid distribution ID.${ResetAnsi}" -ForegroundColor Red
+    if (-not $checkinLine) {
+        Write-Host "${Bold}[FAIL] No 'Last Successful Check-In' field found in cytool status output.${ResetAnsi}" -ForegroundColor Red
+        Write-Host "${Bold}       Cannot confirm this agent has ever reached the tenant -- treating this${ResetAnsi}" -ForegroundColor Red
+        Write-Host "${Bold}       installation as UNSUCCESSFUL. (cytool's output format may differ by${ResetAnsi}" -ForegroundColor Red
+        Write-Host "${Bold}       agent version -- check the raw output above if this looks wrong.)${ResetAnsi}" -ForegroundColor Red
+        $fail++
+    } elseif ([string]::IsNullOrWhiteSpace($checkinValue) -or $checkinValue -match '^(?i)never$') {
+        Write-Host "${Bold}[FAIL] Last Successful Check-In is empty/'Never' -- this agent has NOT${ResetAnsi}" -ForegroundColor Red
+        Write-Host "${Bold}       registered/checked in with the tenant. Installation is UNSUCCESSFUL.${ResetAnsi}" -ForegroundColor Red
         $fail++
     } else {
-        Write-Host "[PASS] Distribution ID appears set: $distLine" -ForegroundColor Green
+        Write-Host "[PASS] Last successful check-in: $checkinValue" -ForegroundColor Green
         $pass++
     }
 } else {
     Write-Host "[SKIP] cytool.exe not found at '$cytool' (path may differ by version, or this"
     Write-Host "       script isn't running elevated)."
-    Write-Host "[SKIP] Cannot confirm distribution ID without cytool -- re-run as Administrator to check it."
+    Write-Host "[SKIP] Cannot confirm tenant check-in without cytool -- re-run as Administrator to check it."
 }
 
 # 6. Recent log/data activity

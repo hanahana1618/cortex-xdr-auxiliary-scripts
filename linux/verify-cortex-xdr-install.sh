@@ -107,39 +107,47 @@ check "Cortex XDR process running (traps_pmd)" bash -c "pgrep -f traps_pmd >/dev
 CYTOOL="$(find /opt/traps -maxdepth 3 -iname cytool 2>/dev/null | head -n1)"
 if [[ -n "$CYTOOL" && -x "$CYTOOL" ]]; then
   echo
+  echo "-- cytool status --"
+  CYTOOL_STATUS_OUT="$("$CYTOOL" status 2>&1)"
+  echo "$CYTOOL_STATUS_OUT" | sed 's/^/  /'
+  echo
   echo "-- cytool runtimequery --"
   "$CYTOOL" runtimequery 2>&1 | sed 's/^/  /' || true
   check "cytool reports agent status" bash -c "'$CYTOOL' runtimequery >/dev/null 2>&1"
 
-  # 4b. Distribution ID configured.
-  #     CAVEAT: PANW does not publicly document an exact field name/label
-  #     for this in cytool's output, so this is a best-effort scan of
-  #     `cytool status` + `runtimequery` text for any line mentioning
-  #     "distribution", checking it has a non-empty, non-placeholder value.
-  #     If your agent version's cytool wording differs, adjust the grep
-  #     pattern below to match what you actually see -- don't trust this
-  #     blindly without checking real output on a known-good install first.
+  # 4b. Tenant check-in evidence.
+  #     `cytool status` prints a "Last Successful Check-In time" field on
+  #     real installs -- this is the actual, confirmed-reliable signal that
+  #     the agent has successfully talked to the tenant. (An earlier
+  #     version of this check instead grepped for a "distribution ID" line
+  #     in cytool's output -- real-world testing showed cytool doesn't
+  #     print one at all on a working, checked-in agent, so that check
+  #     produced a false [FAIL]. Check-in time is what's actually present
+  #     and actually means something; use it instead.)
   echo
-  echo "-- Distribution ID --"
-  DIST_ID_LINE="$( ("$CYTOOL" status 2>/dev/null; "$CYTOOL" runtimequery 2>/dev/null) | grep -i "distribution" | head -n1)"
-  DIST_ID_VALUE="$(echo "$DIST_ID_LINE" | sed -E 's/^[^:=]*[:=][[:space:]]*//' | tr -d '[:space:]')"
-  case "${DIST_ID_VALUE,,}" in
-    ""|"n/a"|"none"|"0"|"null"|"unset")
-      echo "${BOLD}${RED}[FAIL] No distribution ID appears to be set on this agent.${RESET}"
-      echo "${BOLD}${RED}       This installation is UNSUCCESSFUL -- the agent was never told which${RESET}"
-      echo "${BOLD}${RED}       tenant to register with. Reinstall with a valid --distribution-id.${RESET}"
-      FAIL=$((FAIL + 1))
-      ;;
-    *)
-      echo "[PASS] Distribution ID appears set: $DIST_ID_LINE"
-      PASS=$((PASS + 1))
-      ;;
-  esac
+  echo "-- Tenant check-in --"
+  CHECKIN_LINE="$(echo "$CYTOOL_STATUS_OUT" | grep -i "Successful Check-In time (UTC)" | head -n1)"
+  CHECKIN_VALUE="$(echo "$CHECKIN_LINE" | sed -E 's/^[^:]*\(UTC\):[[:space:]]*//')"
+  CHECKIN_CHECKED_VIA_CYTOOL=1
+  if [[ -z "$CHECKIN_LINE" ]]; then
+    echo "${BOLD}${RED}[FAIL] No 'Last Successful Check-In' field found in cytool status output.${RESET}"
+    echo "${BOLD}${RED}       Cannot confirm this agent has ever reached the tenant -- treating this${RESET}"
+    echo "${BOLD}${RED}       installation as UNSUCCESSFUL. (cytool's output format may differ by${RESET}"
+    echo "${BOLD}${RED}       agent version -- check the raw output above if this looks wrong.)${RESET}"
+    FAIL=$((FAIL + 1))
+  elif [[ -z "$CHECKIN_VALUE" || "$CHECKIN_VALUE" =~ ^[Nn]ever$ ]]; then
+    echo "${BOLD}${RED}[FAIL] Last Successful Check-In is empty/'Never' -- this agent has NOT${RESET}"
+    echo "${BOLD}${RED}       registered/checked in with the tenant. Installation is UNSUCCESSFUL.${RESET}"
+    FAIL=$((FAIL + 1))
+  else
+    echo "[PASS] Last successful check-in: $CHECKIN_VALUE"
+    PASS=$((PASS + 1))
+  fi
 else
   echo "[SKIP] cytool binary not found under /opt/traps (path may differ by version, or this"
   echo "       script isn't running as root -- /opt/traps is only traversable by root, so a"
   echo "       non-root run cannot tell 'genuinely missing' apart from 'permission blocked')."
-  echo "[SKIP] Cannot confirm distribution ID without cytool -- re-run with sudo to check it."
+  echo "[SKIP] Cannot confirm tenant check-in without cytool -- re-run with sudo to check it."
 fi
 
 # 5. Recent agent log activity (last 5 minutes)
@@ -227,30 +235,44 @@ elif [[ "$FIX_KERNEL_LOCK" -eq 1 ]]; then
   echo "[SKIP] --fix-kernel-lock passed but cytool wasn't found -- nothing to run."
 fi
 
-# 7. Tenant registration / pairing signals
-#    Doesn't prove registration succeeded the way the console or cytool's
-#    own status field would (checked above, when available), but this is
-#    the log evidence that would explain a missing/stale console entry.
-#    Treated as a hard FAIL, not neutral info: an agent with zero
-#    registration/pairing/connection activity in its own logs is not
-#    something this script will call "installed correctly and healthy".
+# 7. Tenant registration / pairing signals (journalctl-based, supplementary)
+#    IMPORTANT: real-world testing showed a working, successfully
+#    checked-in agent can have ZERO registration/pairing hits in
+#    traps_pmd.service's journald logs -- that data apparently isn't
+#    logged there on all agent versions. So when cytool's own "Last
+#    Successful Check-In" field was available above (the authoritative
+#    signal), this section is INFORMATIONAL ONLY and does not affect
+#    PASS/FAIL, to avoid the false failure we hit before. It only counts
+#    as a hard signal when cytool wasn't available and this is the only
+#    evidence we have.
 echo
-echo "-- Tenant registration / pairing signals --"
+echo "-- Tenant registration / pairing signals (journalctl, supplementary) --"
 REG_HITS="$(journalctl -u traps_pmd.service --no-pager 2>/dev/null | grep -iE 'regist|pair|connect|error|fail' | tail -20)"
 REG_ERROR_HITS="$(echo "$REG_HITS" | grep -iE 'error|fail')"
 if [[ -n "$REG_ERROR_HITS" ]]; then
-  echo "[FAIL] Error/failure lines found in traps_pmd.service logs:"
+  echo "[INFO] Error/failure lines found in traps_pmd.service logs (informational, see cytool"
+  echo "       check-in result above for the authoritative signal):"
   echo "$REG_ERROR_HITS" | sed 's/^/  /'
-  FAIL=$((FAIL + 1))
+  if [[ "${CHECKIN_CHECKED_VIA_CYTOOL:-0}" -ne 1 ]]; then
+    FAIL=$((FAIL + 1))
+  fi
 elif [[ -n "$REG_HITS" ]]; then
-  echo "[PASS] Found registration/pairing/connection activity in traps_pmd.service logs, no errors:"
+  echo "[INFO] Found registration/pairing/connection activity in traps_pmd.service logs, no errors:"
   echo "$REG_HITS" | sed 's/^/  /'
-  PASS=$((PASS + 1))
+  if [[ "${CHECKIN_CHECKED_VIA_CYTOOL:-0}" -ne 1 ]]; then
+    PASS=$((PASS + 1))
+  fi
 else
-  echo "[FAIL] No registration/pairing/connection/error lines found anywhere in traps_pmd.service"
-  echo "       logs -- no evidence this agent has ever registered with a tenant. This alone"
-  echo "       explains a missing console entry; don't call this install healthy without it."
-  FAIL=$((FAIL + 1))
+  if [[ "${CHECKIN_CHECKED_VIA_CYTOOL:-0}" -eq 1 ]]; then
+    echo "[INFO] No registration/pairing/connection/error lines in traps_pmd.service logs -- not"
+    echo "       unusual; this agent version apparently doesn't log check-ins there. See the"
+    echo "       cytool check-in result above for the authoritative signal instead."
+  else
+    echo "[FAIL] No registration/pairing/connection/error lines found anywhere in traps_pmd.service"
+    echo "       logs, and cytool wasn't available to check authoritatively (see above -- likely"
+    echo "       needs sudo). Re-run with sudo before trusting this result."
+    FAIL=$((FAIL + 1))
+  fi
 fi
 
 # 8. System clock sync (cert validation and registration can fail silently on clock skew)
