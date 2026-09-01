@@ -101,9 +101,17 @@ covering the general end-to-end process including the MDM-specific gotchas
     whenever cytool's check-in evidence is available — it only counts
     toward PASS/FAIL as a fallback when cytool itself can't be reached.
 
-  The summary line reports passed/warned/failed counts separately and
-  will not call an install "healthy" when hard failures are present —
-  exit code `1` on any `[FAIL]`.
+  The summary line reports passed/warned/failed counts, then **the very
+  last line is a one-line verdict** meant to be read on its own before
+  the rest of the report — e.g. `⚠️ Cortex XDR is functioning, but NOT at
+  the kernel level` or `❌ Cortex XDR is NOT functioning` followed by a
+  short "most important items to fix" list pulled from the `[FAIL]`s
+  above. Priority order (each tier assumes the ones above it are already
+  true): not running as root with nothing else to go on → not
+  running at all → never checked in with the tenant → checked in but
+  degraded (no kernel module) → checked in and fully functioning. Exit
+  code `1` for "not functioning" or "couldn't verify"; `0` for
+  "functioning" (fully or degraded — the verdict line says which).
 
 ```bash
 # Install
@@ -152,6 +160,9 @@ sudo ./linux/verify-cortex-xdr-install.sh
   This field's wording is confirmed on Linux (cytool is a shared binary
   across platforms) but not independently confirmed on macOS — check the
   raw `cytool status` output this script prints if it looks wrong.
+
+  Ends with the same **one-line verdict** as Linux (see above) — read
+  the last line first.
 - **`INSTALL_GUIDE.md`** — general walkthrough of the whole deployment: why
   profile-before-package ordering matters, the step-by-step, and a
   requirements table.
@@ -197,6 +208,9 @@ sudo ./macos/verify-cortex-xdr-install.sh
   This field's wording is confirmed on Linux (cytool is a shared binary
   across platforms) but not independently confirmed on Windows — check
   the raw `cytool status` output this script prints if it looks wrong.
+
+  Ends with the same **one-line verdict** as Linux (see above) — read
+  the last line first.
 
   Run from an elevated (Administrator) PowerShell prompt.
 - **`INSTALL_GUIDE.md`** — general walkthrough of the whole deployment: why

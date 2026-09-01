@@ -37,12 +37,16 @@
 #                        Agent Settings Profile in the Cortex XDR console
 #                        -- not a local flag.
 #
+# Output ends with a one-line verdict meant to be read on its own, e.g.
+# "Cortex XDR is functioning but NOT at the kernel level" or "Cortex XDR
+# is NOT functioning -- here are the most important items to fix", so you
+# know what action (if any) is needed before reading the full report.
+#
 # Exit codes:
-#   0 - no hard failures (may still have [WARN]s worth reading -- e.g. a
-#       hostname change can explain an agent that's running but not
-#       showing correctly in the tenant console, even though every hard
-#       PASS/FAIL check passed)
-#   1 - agent not found / not running / a hard check failed
+#   0 - functioning (fully at kernel level, or degraded-but-registered
+#       user-space mode -- read the verdict line to tell which)
+#   1 - not functioning, or status couldn't be fully verified (re-run
+#       with sudo)
 #
 set -uo pipefail
 
@@ -69,6 +73,17 @@ done
 PASS=0
 FAIL=0
 WARN=0
+FAIL_ITEMS=()
+
+# State tracked specifically to build the one-line verdict at the end --
+# separate from the PASS/FAIL/WARN counts, because "how many checks
+# failed" isn't the same question as "is this thing actually working".
+IS_ROOT=0
+[[ "$(id -u)" -eq 0 ]] && IS_ROOT=1
+SERVICE_OK=0
+PROCESS_OK=0
+CHECKIN_STATUS="unknown"   # unknown | pass | fail
+KERNEL_MODULE_OK=0
 
 check() {
   local desc="$1"
@@ -80,6 +95,7 @@ check() {
     echo "[FAIL] $desc"
     sed 's/^/       /' /tmp/cortex_verify_out.$$
     FAIL=$((FAIL + 1))
+    FAIL_ITEMS+=("$desc")
   fi
   rm -f /tmp/cortex_verify_out.$$
 }
@@ -93,15 +109,32 @@ check "Install directory /opt/traps exists" test -d /opt/traps
 
 # 2. systemd service exists and is active
 if systemctl list-unit-files 2>/dev/null | grep -q '^traps_pmd\.service'; then
-  check "traps_pmd.service is active" bash -c "systemctl is-active --quiet traps_pmd.service"
+  if systemctl is-active --quiet traps_pmd.service; then
+    echo "[PASS] traps_pmd.service is active"
+    PASS=$((PASS + 1))
+    SERVICE_OK=1
+  else
+    echo "[FAIL] traps_pmd.service is active"
+    FAIL=$((FAIL + 1))
+    FAIL_ITEMS+=("traps_pmd.service is not active")
+  fi
   check "traps_pmd.service is enabled" bash -c "systemctl is-enabled --quiet traps_pmd.service"
 else
   echo "[FAIL] traps_pmd.service unit not found"
   FAIL=$((FAIL + 1))
+  FAIL_ITEMS+=("traps_pmd.service unit not found (agent not installed?)")
 fi
 
 # 3. Agent process actually running
-check "Cortex XDR process running (traps_pmd)" bash -c "pgrep -f traps_pmd >/dev/null"
+if pgrep -f traps_pmd >/dev/null 2>&1; then
+  echo "[PASS] Cortex XDR process running (traps_pmd)"
+  PASS=$((PASS + 1))
+  PROCESS_OK=1
+else
+  echo "[FAIL] Cortex XDR process running (traps_pmd)"
+  FAIL=$((FAIL + 1))
+  FAIL_ITEMS+=("no traps_pmd process running")
+fi
 
 # 4. cytool status / version, if the binary is present
 CYTOOL="$(find /opt/traps -maxdepth 3 -iname cytool 2>/dev/null | head -n1)"
@@ -135,13 +168,18 @@ if [[ -n "$CYTOOL" && -x "$CYTOOL" ]]; then
     echo "${BOLD}${RED}       installation as UNSUCCESSFUL. (cytool's output format may differ by${RESET}"
     echo "${BOLD}${RED}       agent version -- check the raw output above if this looks wrong.)${RESET}"
     FAIL=$((FAIL + 1))
+    FAIL_ITEMS+=("no 'Last Successful Check-In' field in cytool output")
+    CHECKIN_STATUS="fail"
   elif [[ -z "$CHECKIN_VALUE" || "$CHECKIN_VALUE" =~ ^[Nn]ever$ ]]; then
     echo "${BOLD}${RED}[FAIL] Last Successful Check-In is empty/'Never' -- this agent has NOT${RESET}"
     echo "${BOLD}${RED}       registered/checked in with the tenant. Installation is UNSUCCESSFUL.${RESET}"
     FAIL=$((FAIL + 1))
+    FAIL_ITEMS+=("agent has never checked in with the tenant")
+    CHECKIN_STATUS="fail"
   else
     echo "[PASS] Last successful check-in: $CHECKIN_VALUE"
     PASS=$((PASS + 1))
+    CHECKIN_STATUS="pass"
   fi
 else
   echo "[SKIP] cytool binary not found under /opt/traps (path may differ by version, or this"
@@ -178,11 +216,13 @@ KMOD_HIT="$(lsmod 2>/dev/null | grep -iE '^(pan_|cortex|traps|kproc)' | head -n1
 if [[ -n "$KMOD_HIT" ]]; then
   echo "[PASS] Cortex XDR kernel module appears loaded: $KMOD_HIT"
   PASS=$((PASS + 1))
+  KERNEL_MODULE_OK=1
 else
   echo "[FAIL] No Cortex XDR kernel module found in 'lsmod' -- agent is running in degraded"
   echo "       user-space/asynchronous mode, not full kernel mode. Commonly caused by running"
   echo "       an uncertified/distro-patched kernel: $(uname -r)"
   FAIL=$((FAIL + 1))
+  FAIL_ITEMS+=("kernel module not loaded (degraded/user-space mode, kernel $(uname -r))")
 fi
 
 if command -v dmesg >/dev/null 2>&1; then
@@ -212,6 +252,7 @@ if [[ -n "${CYTOOL:-}" && -x "${CYTOOL:-}" ]]; then
     echo "       (repeated ungraceful shutdowns tripped a lockout), NOT the same thing as an"
     echo "       unsupported kernel. Documented recovery: PANW KB kA14u000000CqdACAS."
     FAIL=$((FAIL + 1))
+    FAIL_ITEMS+=("cytool reports 'Kernel Module Locked' -- recoverable, see --fix-kernel-lock")
     if [[ "$FIX_KERNEL_LOCK" -eq 1 ]]; then
       echo "       --fix-kernel-lock passed -- running the documented recovery sequence:"
       echo "       (this briefly disables agent protection)"
@@ -272,6 +313,7 @@ else
     echo "       logs, and cytool wasn't available to check authoritatively (see above -- likely"
     echo "       needs sudo). Re-run with sudo before trusting this result."
     FAIL=$((FAIL + 1))
+    FAIL_ITEMS+=("no registration evidence found, and cytool unavailable to confirm (try sudo)")
   fi
 fi
 
@@ -331,16 +373,49 @@ fi
 
 echo
 echo "== Summary: $PASS passed, $WARN warned, $FAIL failed =="
+echo
 
-if [[ "$FAIL" -gt 0 ]]; then
-  echo "Cortex XDR agent verification found problems - see [FAIL] lines above."
-  exit 1
+# ---------------------------------------------------------------------------
+# One-line verdict, meant to be read on its own before the rest of the
+# report. Priority order matters: "is it running at all" beats "is it
+# registered" beats "is it at full kernel-mode capability" -- each tier
+# below assumes everything above it is already true.
+# ---------------------------------------------------------------------------
+EXIT_CODE=0
+if [[ "$IS_ROOT" -ne 1 && "$CHECKIN_STATUS" == "unknown" ]]; then
+  echo "${BOLD}❓ CANNOT FULLY VERIFY: re-run this script with sudo for a definitive answer.${RESET}"
+  echo "   (cytool and several other checks need root -- results above are incomplete without it.)"
+  EXIT_CODE=1
+elif [[ "$SERVICE_OK" -ne 1 || "$PROCESS_OK" -ne 1 ]]; then
+  echo "${BOLD}${RED}❌ Cortex XDR is NOT functioning -- the agent isn't running on this machine.${RESET}"
+  echo "   Most important items to fix:"
+  for item in "${FAIL_ITEMS[@]}"; do echo "     - $item"; done
+  EXIT_CODE=1
+elif [[ "$CHECKIN_STATUS" == "fail" ]]; then
+  echo "${BOLD}${RED}❌ Cortex XDR is NOT functioning -- it's running locally but has never${RESET}"
+  echo "${BOLD}${RED}   registered/checked in with your tenant.${RESET}"
+  echo "   Most important items to fix:"
+  for item in "${FAIL_ITEMS[@]}"; do echo "     - $item"; done
+  EXIT_CODE=1
+elif [[ "$KERNEL_MODULE_OK" -ne 1 ]]; then
+  echo "${BOLD}⚠️  Cortex XDR is functioning, but NOT at the kernel level${RESET} (degraded/user-space mode)."
+  echo "   Registered and checked in with the tenant, but Anti-Malware/DSE and similar"
+  echo "   kernel-dependent capabilities are unavailable. See 'Kernel module / operation mode'"
+  echo "   above -- likely fix is enabling BPF fallback in this endpoint's Agent Settings"
+  echo "   Profile in the console, not reinstalling or changing distribution IDs."
+  EXIT_CODE=0
+elif [[ "$FAIL" -gt 0 ]]; then
+  echo "${BOLD}${RED}❌ Cortex XDR has problems beyond the core checks -- see [FAIL] lines above.${RESET}"
+  echo "   Most important items to fix:"
+  for item in "${FAIL_ITEMS[@]}"; do echo "     - $item"; done
+  EXIT_CODE=1
 elif [[ "$WARN" -gt 0 ]]; then
-  echo "No hard failures, but $WARN warning(s) above are worth resolving -- e.g. a kernel-module or"
-  echo "hostname-stability warning can explain an agent that's running but not showing correctly in"
-  echo "the tenant console, even though every hard check passed."
-  exit 0
+  echo "${BOLD}✅ Cortex XDR is functioning at the kernel level${RESET}, with $WARN minor item(s) worth a look"
+  echo "   (e.g. hostname change or clock sync) -- see [WARN] lines above."
+  EXIT_CODE=0
 else
-  echo "Cortex XDR agent looks installed and healthy, with no warnings."
-  exit 0
+  echo "${BOLD}✅ Cortex XDR is fully functioning at the kernel level, no issues detected.${RESET}"
+  EXIT_CODE=0
 fi
+
+exit "$EXIT_CODE"

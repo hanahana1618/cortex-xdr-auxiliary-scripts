@@ -29,6 +29,14 @@
 .NOTES
     Run from an elevated (Administrator) PowerShell prompt.
 
+    Output ends with a one-line verdict meant to be read on its own, e.g.
+    "Cortex XDR is functioning but NOT at full kernel-level capability" or
+    "Cortex XDR is NOT functioning -- here are the most important items to
+    fix", so you know what action (if any) is needed before reading the
+    full report. Exit code 0 = functioning (fully, or degraded-but-
+    registered -- read the verdict line to tell which); 1 = not
+    functioning, or status couldn't be fully verified (re-run elevated).
+
 .EXAMPLE
     .\verify-cortex-xdr-install.ps1
 #>
@@ -39,6 +47,14 @@ param()
 $ErrorActionPreference = 'SilentlyContinue'
 $pass = 0
 $fail = 0
+$warn = 0
+$failItems = New-Object System.Collections.Generic.List[string]
+
+# State tracked specifically for the one-line verdict at the end.
+$serviceOk = $false
+$processOk = $false
+$checkinStatus = 'unknown'   # unknown | pass | fail
+$kernelLevelOk = 'unknown'   # unknown | pass | fail
 
 # ANSI bold, layered on top of Write-Host's -ForegroundColor for terminals
 # that support VT escape sequences (Windows Terminal / PowerShell 7+ do by
@@ -59,10 +75,12 @@ function Test-Check {
         } else {
             Write-Host "[FAIL] $Description" -ForegroundColor Red
             $script:fail++
+            $script:failItems.Add($Description)
         }
     } catch {
         Write-Host "[FAIL] $Description ($($_.Exception.Message))" -ForegroundColor Red
         $script:fail++
+        $script:failItems.Add($Description)
     }
 }
 
@@ -90,11 +108,20 @@ Write-Host ""
 Write-Host "-- Service status --"
 $svc = Get-Service -Name "cyserver" -ErrorAction SilentlyContinue
 if ($svc) {
-    Test-Check "cyserver service is Running" { $svc.Status -eq 'Running' }
+    if ($svc.Status -eq 'Running') {
+        Write-Host "[PASS] cyserver service is Running" -ForegroundColor Green
+        $pass++
+        $serviceOk = $true
+    } else {
+        Write-Host "[FAIL] cyserver service is Running" -ForegroundColor Red
+        $fail++
+        $failItems.Add("cyserver service is not Running (status: $($svc.Status))")
+    }
     Test-Check "cyserver service StartType is Automatic" { $svc.StartType -eq 'Automatic' }
 } else {
     Write-Host "[FAIL] cyserver service not found" -ForegroundColor Red
     $fail++
+    $failItems.Add("cyserver service not found (agent not installed?)")
 }
 
 # Related driver/filter services -- informational only, presence/names
@@ -110,7 +137,15 @@ foreach ($svcName in @('cyverak', 'cyvrmtgn', 'cyvrfsfd')) {
 
 # 4. Agent process running
 Write-Host ""
-Test-Check "Cortex XDR process running (cyserver.exe)" { (Get-Process -Name "cyserver" -ErrorAction SilentlyContinue) -ne $null }
+if ((Get-Process -Name "cyserver" -ErrorAction SilentlyContinue)) {
+    Write-Host "[PASS] Cortex XDR process running (cyserver.exe)" -ForegroundColor Green
+    $pass++
+    $processOk = $true
+} else {
+    Write-Host "[FAIL] Cortex XDR process running (cyserver.exe)" -ForegroundColor Red
+    $fail++
+    $failItems.Add("no cyserver.exe process running")
+}
 
 # 5. cytool status, if present
 $cytool = Join-Path $installDir "cytool.exe"
@@ -159,13 +194,34 @@ if (Test-Path $cytool) {
         Write-Host "${Bold}       installation as UNSUCCESSFUL. (cytool's output format may differ by${ResetAnsi}" -ForegroundColor Red
         Write-Host "${Bold}       agent version -- check the raw output above if this looks wrong.)${ResetAnsi}" -ForegroundColor Red
         $fail++
+        $failItems.Add("no 'Last Successful Check-In' field in cytool output")
+        $checkinStatus = 'fail'
     } elseif ([string]::IsNullOrWhiteSpace($checkinValue) -or $checkinValue -match '^(?i)never$') {
         Write-Host "${Bold}[FAIL] Last Successful Check-In is empty/'Never' -- this agent has NOT${ResetAnsi}" -ForegroundColor Red
         Write-Host "${Bold}       registered/checked in with the tenant. Installation is UNSUCCESSFUL.${ResetAnsi}" -ForegroundColor Red
         $fail++
+        $failItems.Add("agent has never checked in with the tenant")
+        $checkinStatus = 'fail'
     } else {
         Write-Host "[PASS] Last successful check-in: $checkinValue" -ForegroundColor Green
         $pass++
+        $checkinStatus = 'pass'
+    }
+
+    # 5c. Kernel-level capability, inferred from cytool's own wording.
+    #     CAVEAT: "Kernel Not Supported" is CONFIRMED real wording from a
+    #     real Linux agent's `cytool status` output (Operational Status
+    #     section, e.g. "Anti Malware : Kernel Not Supported"), not
+    #     independently confirmed on Windows. cytool is a shared binary
+    #     across platforms so this is a reasonable best-effort port, but
+    #     verify against the raw output above if this looks wrong.
+    $kernelNotSupported = $cytoolStatusOutput | Where-Object { $_ -match 'Kernel Not Supported' }
+    if ($kernelNotSupported) {
+        Write-Host "[INFO] cytool reports 'Kernel Not Supported' for one or more capabilities (see raw"
+        Write-Host "       output above) -- some kernel-dependent protections are degraded/unavailable."
+        $kernelLevelOk = 'fail'
+    } elseif ($cytoolStatusOutput) {
+        $kernelLevelOk = 'pass'
     }
 } else {
     Write-Host "[SKIP] cytool.exe not found at '$cytool' (path may differ by version, or this"
@@ -183,6 +239,7 @@ if (Test-Path $dataDir) {
         $pass++
     } else {
         Write-Host "[WARN] No recent file activity in $dataDir in the last 5 minutes (may be normal if idle)" -ForegroundColor Yellow
+        $warn++
     }
 } else {
     Write-Host "[SKIP] $dataDir not found"
@@ -197,18 +254,54 @@ try {
         $pass++
     } else {
         Write-Host "[WARN] No related Application-log events found in the last 30 minutes" -ForegroundColor Yellow
+        $warn++
     }
 } catch {
     Write-Host "[SKIP] Could not query the Windows Event Log"
 }
 
 Write-Host ""
-Write-Host "== Summary: $pass passed, $fail failed =="
+Write-Host "== Summary: $pass passed, $warn warned, $fail failed =="
+Write-Host ""
 
-if ($fail -eq 0) {
-    Write-Host "Cortex XDR agent looks installed and healthy." -ForegroundColor Green
-    exit 0
+# ---------------------------------------------------------------------------
+# One-line verdict, meant to be read on its own before the rest of the
+# report. Priority order matters: "is it running at all" beats "is it
+# registered" beats "is it at full kernel-level capability".
+# ---------------------------------------------------------------------------
+$exitCode = 0
+if ((-not $isAdmin) -and $checkinStatus -eq 'unknown') {
+    Write-Host "${Bold}❓ CANNOT FULLY VERIFY: re-run this script as Administrator for a definitive answer.${ResetAnsi}"
+    Write-Host "   (cytool and several other checks need elevation -- results above are incomplete without it.)"
+    $exitCode = 1
+} elseif ((-not $serviceOk) -or (-not $processOk)) {
+    Write-Host "${Bold}❌ Cortex XDR is NOT functioning -- the agent isn't running on this machine.${ResetAnsi}" -ForegroundColor Red
+    Write-Host "   Most important items to fix:"
+    foreach ($item in $failItems) { Write-Host "     - $item" }
+    $exitCode = 1
+} elseif ($checkinStatus -eq 'fail') {
+    Write-Host "${Bold}❌ Cortex XDR is NOT functioning -- it's running locally but has never${ResetAnsi}" -ForegroundColor Red
+    Write-Host "${Bold}   registered/checked in with your tenant.${ResetAnsi}" -ForegroundColor Red
+    Write-Host "   Most important items to fix:"
+    foreach ($item in $failItems) { Write-Host "     - $item" }
+    $exitCode = 1
+} elseif ($kernelLevelOk -eq 'fail') {
+    Write-Host "${Bold}⚠️  Cortex XDR is functioning, but NOT at full kernel-level capability${ResetAnsi}"
+    Write-Host "   (cytool reports 'Kernel Not Supported' for some capabilities -- see raw output above)."
+    Write-Host "   Registered and checked in with the tenant, though. Likely fix: enable BPF/User Space"
+    Write-Host "   fallback in this endpoint's Agent Settings Profile in the console."
+    $exitCode = 0
+} elseif ($fail -gt 0) {
+    Write-Host "${Bold}❌ Cortex XDR has problems beyond the core checks -- see [FAIL] lines above.${ResetAnsi}" -ForegroundColor Red
+    Write-Host "   Most important items to fix:"
+    foreach ($item in $failItems) { Write-Host "     - $item" }
+    $exitCode = 1
+} elseif ($warn -gt 0) {
+    Write-Host "${Bold}✅ Cortex XDR is functioning${ResetAnsi}, with $warn minor item(s) worth a look -- see [WARN] lines above." -ForegroundColor Green
+    $exitCode = 0
 } else {
-    Write-Host "Cortex XDR agent verification found problems - see [FAIL] lines above." -ForegroundColor Red
-    exit 1
+    Write-Host "${Bold}✅ Cortex XDR is fully functioning, no issues detected.${ResetAnsi}" -ForegroundColor Green
+    $exitCode = 0
 }
+
+exit $exitCode
